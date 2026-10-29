@@ -4,6 +4,7 @@ RELEASES ?= releases
 MESON     ?= meson
 NINJA     ?= ninja
 TAR       ?= tar
+PYTHON    ?= $(shell command -v python3 2>/dev/null)
 CONTAINER ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null || echo podman)
 
 ifeq ($(filter grouped-target,$(.FEATURES)),)
@@ -51,14 +52,14 @@ BUILD_STAMPS := $(foreach a,$(ARCHES),$(OUT)/.built-$(a))
 DIST_FILES := meson.build meson_options.txt version.h.in RELEASE \
               build-win32.txt build-win64.txt dxvk.conf \
               Makefile LICENSE README.md
-DIST_TREES := src include .github
+DIST_TREES := src include .github tools
 SUBMODULES := include/vulkan include/spirv
 
 NO_SUDO = @test -z "$$SUDO_USER" || { echo "error: do not build with sudo — run 'make' as your user"; exit 1; }
 
 .DELETE_ON_ERROR:
 
-.PHONY: all x64 x32 dist release release-container clean help
+.PHONY: all x64 x32 dist release release-container check-release clean help
 
 all: $(BUILD_STAMPS)
 
@@ -101,6 +102,22 @@ $(OUT)/.dist: $(BUILD_STAMPS) $(DIST_FILES) | $(OUT)
 
 $(RELEASES)/$(DIST_NAME).tar.gz: $(OUT)/.dist | $(RELEASES)
 	$(TAR) -czf $@ -C $(DIST_DIR) $(DIST_NAME)
+	@$(MAKE) --no-print-directory check-release TARBALL=$@
+
+# Autorun on the Switch downloads a release by name and unpacks it with its own
+# tar reader, so a tarball it cannot read is a release nobody can install there.
+# tools/check-release.py repeats those rules; skip it rather than fail where
+# python3 is not installed.
+TARBALL ?= $(RELEASES)/$(DIST_NAME).tar.gz
+
+check-release:
+	@if [ -z "$(PYTHON)" ]; then \
+	  echo "note: python3 not found, Autorun payload check skipped"; \
+	elif [ ! -f tools/check-release.py ]; then \
+	  echo "note: tools/check-release.py missing, Autorun payload check skipped"; \
+	else \
+	  $(PYTHON) tools/check-release.py $(TARBALL); \
+	fi
 
 release-container:
 	$(CONTAINER) run --rm -v "$(CURDIR):/src:z" -w /src \
@@ -118,6 +135,7 @@ help:
 	@echo "make dist               source + build tree in $(DIST_DIR)/"
 	@echo "make release            tarball into $(RELEASES)/ (host toolchain)"
 	@echo "make release-container  the same, built inside $(CONTAINER_BASE)"
+	@echo "make check-release      verify $(TARBALL) is one Autorun installs"
 	@echo "make clean"
 	@echo ""
 	@echo "no install target: dxvk dlls are set up per wine prefix, not system wide"

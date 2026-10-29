@@ -1,0 +1,17 @@
+name: Payload Check
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  autorun-payload-tool:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+
+    # The tool that decides whether a release can be installed on a Switch.
+    # Its own tests build a synthetic payload, so no mingw toolchain is needed
+    # to know it still rejects what Autorun's tar reader rejects.
+    - name: Release payload checks
+      run: python3 tools/check-release.py --self-test

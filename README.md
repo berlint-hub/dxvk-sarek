@@ -33,6 +33,7 @@ A huge thank-you to the following contributors for their invaluable help:
 - [Degraded Features](#degraded-features)
 - [How to Use](#how-to-use)
 - [Build Instructions](#build-instructions)
+- [Releases for Autorun (Nintendo Switch)](#releases-for-autorun-nintendo-switch)
 - [Logs](#logs)
 - [HUD](#hud)
 - [Frame Rate Limit](#frame-rate-limit)
@@ -180,6 +181,38 @@ ninja install
 ```
 
 The D3D9, D3D10, D3D11 and DXGI DLLs are located in `/your/dxvk/directory/bin`. Setup has to be done manually in this case.
+
+## Releases for Autorun (Nintendo Switch)
+
+[Autorun](https://github.com/autorunhq/autorun) is the Switch runtime that runs Windows games on this fork. It has no installer that takes a tarball from anywhere: it reads the release list from the GitHub API, picks one asset by name, and unpacks it with its own tar reader (`horizon-wine/source/dxvk_releases.c`). Anything that reader cannot follow is dropped, and a payload that survives with the wrong DLLs is thrown away as an invalid archive. A release only exists for Autorun if it matches these rules:
+
+- **Asset name.** `dxvk-sarek-<version>.tar.gz`, or `dxvk-sarek-v<version>.tar.gz` when the tag carries the `v`. `make release` names the first one from `RELEASE`. Tag the commit `v1.14.1`: the workflow fires on `v*` and the asset name comes from `RELEASE`, so the two do not drift.
+- **Layout.** Every DLL has a directory named `x32` or `x64` directly above it, and both architectures have files. `build/x32` and `build/x64` in the `make dist` tree already sit that way.
+- **DLLs.** `ddraw.dll`, `d3d8.dll`, `d3d9.dll`, `d3d10core.dll`, `d3d11.dll` and `dxgi.dll`. `ddraw` is 32-bit only, so a 64-bit payload ships the other five.
+- **The DLLs themselves.** Each has to be a PE for its architecture (0x014c with PE32, 0x8664 with PE32+) and marked as a DLL.
+- **Plain ustar.** Member names under 100 bytes, no GNU long names, no pax headers. The reader looks at the first 100 bytes of the name field and gives up on the whole archive when a name does not end inside them.
+
+`make release` runs `tools/check-release.py` on the tarball it just built, and the release workflow runs the same check before publishing, so a release Autorun would refuse fails in CI rather than on a console. Run it by hand with `make check-release`, or against any archive:
+
+```
+python3 tools/check-release.py releases/dxvk-sarek-1.14.1.tar.gz
+```
+
+The script has its own tests (`--self-test`) built from a synthetic payload, so it can be checked without a mingw toolchain.
+
+> [!NOTE]
+> **Version ceiling.** Autorun's options table (`horizon-wine/source/dxvk_options.c`) knows Sarek up to **1.14.1** and answers "This DXVK version is not recognized" above that, which takes the per-game DXVK options screen away for anything newer. The check warns when `RELEASE` passes that ceiling. It is only a warning: the build still installs, and the ceiling moves when Autorun's table does, not when this one does.
+
+Autorun downloads Sarek from `pythonlover02/dxvk-sarek`. To take releases built from this fork instead, point its backend entry at it in `horizon-wine/source/dxvk_releases.c`:
+
+```c
+static const struct release_backend sarek_backend = {
+    "dxvk-sarek", "berlint-hub/dxvk-sarek", "https://github.com/berlint-hub/dxvk-sarek/", "dxvk-sarek", "gz",
+    "dxvk-sarek", "dxvk-sarek64", sarek_dlls, sizeof(sarek_dlls) / sizeof(sarek_dlls[0]), 0
+};
+```
+
+Both the repository and the URL prefix have to change: Autorun ignores an asset whose `browser_download_url` does not start with the prefix.
 
 ## Logs
 

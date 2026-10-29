@@ -27,6 +27,18 @@ jobs:
       id: build-release
       run: make release-container
 
+    # Autorun on the Switch installs a release by asset name alone and unpacks
+    # it with its own tar reader, so a payload it would refuse must fail here.
+    # tools/check-release.py repeats those rules, including the 1.14.1 ceiling
+    # its options table stops at.
+    - name: Check the payload Autorun unpacks
+      id: check-payload
+      run: |
+        python3 tools/check-release.py --self-test
+        for archive in releases/*.tar.gz; do
+          python3 tools/check-release.py "$archive"
+        done
+
     - name: List artifacts
       id: list-artifacts
       run: du -h releases/*
