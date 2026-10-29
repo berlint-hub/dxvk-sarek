@@ -242,27 +242,42 @@ namespace dxvk {
       std::atomic<uint8_t>    used     { 0 };
     };
 
-    static constexpr uint32_t InstanceMapSize    = 4096;
+    /* One object of this class exists per shader combination the game uses and
+     * lives as long as the device, so everything stored inline here is
+     * multiplied by every combination a game touches. It used to carry 4096
+     * instance slots, 8192 overflow slots, 2048 fallback slots and a 4096-entry
+     * queued set: 272 KiB per combination. A game with a thousand of them held
+     * a quarter of a gigabyte of metadata, and because that is far larger than
+     * the console's shared 2 MiB L2, every lookup also walked into cold memory.
+     * One combination realistically sees a handful of state vectors and one or
+     * two render passes, so the tables are sized for that instead.
+     *
+     * The overflow table keeps the old capacity per probe and is only allocated
+     * the first time the primary table fills up, so a game that does churn
+     * hundreds of variants for one shader pair still gets its entries. */
+    static constexpr uint32_t InstanceMapSize    = 256;
     static constexpr uint32_t InstanceMapMask    = InstanceMapSize - 1;
-    static constexpr uint32_t MaxProbeDistance    = 64;
-    static constexpr uint32_t OverflowMapSize    = 8192;
+    static constexpr uint32_t MaxProbeDistance   = 24;
+    static constexpr uint32_t OverflowMapSize    = 2048;
     static constexpr uint32_t OverflowMapMask    = OverflowMapSize - 1;
-    static constexpr uint32_t OverflowProbeMax   = 128;
-    static constexpr uint32_t FallbackMapSize    = 2048;
+    static constexpr uint32_t OverflowProbeMax   = 64;
+    static constexpr uint32_t FallbackMapSize    = 128;
     static constexpr uint32_t FallbackMapMask    = FallbackMapSize - 1;
     static constexpr uint32_t FallbackProbeMax   = 16;
 
-    static constexpr uint32_t QueuedSetSize = 4096;
+    /* Only in flight for as long as a variant sits in the compiler queue, and
+     * a collision merely defers one queue submission to a later draw. */
+    static constexpr uint32_t QueuedSetSize = 64;
     static constexpr uint32_t QueuedSetMask = QueuedSetSize - 1;
+
+    using OverflowMap = std::array<LockFreeMapEntry, OverflowMapSize>;
 
     sync::List<DxvkGraphicsPipelineInstance>  m_pipelines;
 
     std::array<std::atomic<size_t>, QueuedSetSize> m_queuedSet;
 
     std::array<LockFreeMapEntry,  InstanceMapSize>   m_instanceMap;
-    std::atomic<bool>                                m_instanceMapOverflow { false };
-
-    std::array<LockFreeMapEntry,  OverflowMapSize>   m_overflowMap;
+    std::atomic<OverflowMap*>                        m_overflowMap { nullptr };
     std::array<FallbackMapEntry,  FallbackMapSize>   m_fallbackMap;
     std::atomic<VkPipeline>                          m_basePipeline { VK_NULL_HANDLE };
     std::atomic<bool>                                m_hasBasePipeline { false };
@@ -271,14 +286,25 @@ namespace dxvk {
       const DxvkGraphicsPipelineStateInfo& state,
       const DxvkRenderPass*                renderPass);
 
+    /* The hash walks the whole state vector, so callers that need to look up
+     * and then insert compute it once and pass it on instead of hashing the
+     * same 400-odd bytes three times. */
     DxvkGraphicsPipelineInstance* findInstanceLockFree(
+            size_t                               hash,
       const DxvkGraphicsPipelineStateInfo& state,
       const DxvkRenderPass*                renderPass);
 
     void insertInstanceToMap(
+            size_t                               hash,
       const DxvkGraphicsPipelineStateInfo& state,
       const DxvkRenderPass*                renderPass,
       DxvkGraphicsPipelineInstance*         inst);
+
+    OverflowMap* overflowMap() const {
+      return m_overflowMap.load(std::memory_order_acquire);
+    }
+
+    OverflowMap* acquireOverflowMap();
 
     DxvkGraphicsPipelineInstance* createInstance(
       const DxvkGraphicsPipelineStateInfo& state,

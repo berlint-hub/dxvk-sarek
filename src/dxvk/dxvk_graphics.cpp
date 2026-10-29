@@ -50,6 +50,8 @@ namespace dxvk {
   DxvkGraphicsPipeline::~DxvkGraphicsPipeline() {
     for (const auto& instance : m_pipelines)
       this->destroyPipeline(instance.pipeline());
+
+    delete m_overflowMap.load(std::memory_order_acquire);
   }
 
 
@@ -70,7 +72,9 @@ namespace dxvk {
   VkPipeline DxvkGraphicsPipeline::getPipelineHandle(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
-    DxvkGraphicsPipelineInstance* instance = this->findInstanceLockFree(state, renderPass);
+    size_t hash = computeInstanceHash(state, renderPass);
+
+    DxvkGraphicsPipelineInstance* instance = this->findInstanceLockFree(hash, state, renderPass);
 
     if (likely(instance != nullptr))
       return instance->pipeline();
@@ -84,16 +88,15 @@ namespace dxvk {
     // it is still compiling; without it the queue would grow without
     // bound from repeated draws of the same state.
     if (m_pipeMgr->m_async != nullptr) {
-      size_t h    = computeInstanceHash(state, renderPass);
-      uint32_t qs = uint32_t(h) & QueuedSetMask;
+      uint32_t qs = uint32_t(hash) & QueuedSetMask;
       size_t expected = 0;
-      if (m_queuedSet[qs].compare_exchange_strong(expected, h,
+      if (m_queuedSet[qs].compare_exchange_strong(expected, hash,
               std::memory_order_acq_rel, std::memory_order_relaxed)) {
         m_pipeMgr->m_async->queueCompilation(this, state, renderPass);
-      } else if (expected != h) {
+      } else if (expected != hash) {
         uint32_t qs2 = ((qs >> 7) ^ qs ^ 0x55u) & QueuedSetMask;
         expected = 0;
-        if (m_queuedSet[qs2].compare_exchange_strong(expected, h,
+        if (m_queuedSet[qs2].compare_exchange_strong(expected, hash,
                 std::memory_order_acq_rel, std::memory_order_relaxed)) {
           m_pipeMgr->m_async->queueCompilation(this, state, renderPass);
         }
@@ -104,19 +107,18 @@ namespace dxvk {
     VkPipeline fallback = this->findFallback(renderPass);
 
     if (fallback != VK_NULL_HANDLE && m_pipeMgr->m_dyasync != nullptr) {
-      size_t h    = computeInstanceHash(state, renderPass);
-      uint32_t qs = uint32_t(h) & QueuedSetMask;
+      uint32_t qs = uint32_t(hash) & QueuedSetMask;
       size_t expected = 0;
-      if (m_queuedSet[qs].compare_exchange_strong(expected, h,
+      if (m_queuedSet[qs].compare_exchange_strong(expected, hash,
               std::memory_order_acq_rel, std::memory_order_relaxed)) {
         if (!m_pipeMgr->m_dyasync->queueCompilation(
               this, state, renderPass, DxvkPipelinePriority::Live)) {
           m_queuedSet[qs].store(0, std::memory_order_release);
         }
-      } else if (expected != h) {
+      } else if (expected != hash) {
         uint32_t qs2 = ((qs >> 7) ^ qs ^ 0x55u) & QueuedSetMask;
         expected = 0;
-        if (m_queuedSet[qs2].compare_exchange_strong(expected, h,
+        if (m_queuedSet[qs2].compare_exchange_strong(expected, hash,
                 std::memory_order_acq_rel, std::memory_order_relaxed)) {
           if (!m_pipeMgr->m_dyasync->queueCompilation(
                 this, state, renderPass, DxvkPipelinePriority::Live)) {
@@ -127,7 +129,7 @@ namespace dxvk {
       return fallback;
     }
 
-    instance = this->findInstanceLockFree(state, renderPass);
+    instance = this->findInstanceLockFree(hash, state, renderPass);
     if (instance != nullptr)
       return instance->pipeline();
 
@@ -147,13 +149,14 @@ namespace dxvk {
     if (!this->validatePipelineState(state, false))
       return false;
 
-    if (this->findInstanceLockFree(state, renderPass) != nullptr)
+    size_t h = computeInstanceHash(state, renderPass);
+
+    if (this->findInstanceLockFree(h, state, renderPass) != nullptr)
       return false;
 
     auto* instance = this->createInstance(state, renderPass);
     bool result = (instance != nullptr);
 
-    size_t h    = computeInstanceHash(state, renderPass);
     uint32_t qs = uint32_t(h) & QueuedSetMask;
     size_t current = m_queuedSet[qs].load(std::memory_order_acquire);
     if (current == h)
@@ -195,10 +198,9 @@ namespace dxvk {
 
 
   DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::findInstanceLockFree(
+          size_t                               h,
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
-    size_t h = computeInstanceHash(state, renderPass);
-
     for (uint32_t i = 0; i < MaxProbeDistance; i++) {
       uint32_t slot = (uint32_t(h) + i) & InstanceMapMask;
       size_t stored = m_instanceMap[slot].hash.load(std::memory_order_acquire);
@@ -213,19 +215,21 @@ namespace dxvk {
       }
     }
 
-    if (!m_instanceMapOverflow.load(std::memory_order_acquire))
+    const OverflowMap* overflow = this->overflowMap();
+
+    if (overflow == nullptr)
       return nullptr;
 
     size_t h2 = (h ^ (h >> 16)) * 0x45d9f3bu;
     for (uint32_t i = 0; i < OverflowProbeMax; i++) {
       uint32_t slot = (uint32_t(h2) + i) & OverflowMapMask;
-      size_t stored = m_overflowMap[slot].hash.load(std::memory_order_acquire);
+      size_t stored = (*overflow)[slot].hash.load(std::memory_order_acquire);
 
       if (stored == 0)
         return nullptr;
 
       if (stored == h) {
-        auto* inst = m_overflowMap[slot].instance.load(std::memory_order_acquire);
+        auto* inst = (*overflow)[slot].instance.load(std::memory_order_acquire);
         if (inst != nullptr && inst->isCompatible(state, renderPass))
           return inst;
       }
@@ -236,11 +240,10 @@ namespace dxvk {
 
 
   void DxvkGraphicsPipeline::insertInstanceToMap(
+          size_t                               h,
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass,
     DxvkGraphicsPipelineInstance*         inst) {
-    size_t h = computeInstanceHash(state, renderPass);
-
     for (uint32_t i = 0; i < MaxProbeDistance; i++) {
       uint32_t slot = (uint32_t(h) + i) & InstanceMapMask;
       size_t expected = 0;
@@ -263,43 +266,67 @@ namespace dxvk {
       }
     }
 
-    m_instanceMapOverflow.store(true, std::memory_order_release);
-
+    OverflowMap* overflow = this->acquireOverflowMap();
     size_t h2 = (h ^ (h >> 16)) * 0x45d9f3bu;
+
     for (uint32_t i = 0; i < OverflowProbeMax; i++) {
       uint32_t slot = (uint32_t(h2) + i) & OverflowMapMask;
       size_t expected = 0;
 
-      if (m_overflowMap[slot].hash.compare_exchange_strong(
+      if ((*overflow)[slot].hash.compare_exchange_strong(
               expected, h, std::memory_order_acq_rel)) {
-        m_overflowMap[slot].instance.store(inst, std::memory_order_release);
+        (*overflow)[slot].instance.store(inst, std::memory_order_release);
         return;
       }
 
       if (expected == h) {
-        auto* existing = m_overflowMap[slot].instance.load(std::memory_order_acquire);
+        auto* existing = (*overflow)[slot].instance.load(std::memory_order_acquire);
         if (existing != nullptr) {
           if (existing->isCompatible(state, renderPass))
             return;
           continue;
         }
-        m_overflowMap[slot].instance.store(inst, std::memory_order_release);
+        (*overflow)[slot].instance.store(inst, std::memory_order_release);
         return;
       }
     }
   }
 
 
+  DxvkGraphicsPipeline::OverflowMap* DxvkGraphicsPipeline::acquireOverflowMap() {
+    OverflowMap* overflow = this->overflowMap();
+
+    if (overflow != nullptr)
+      return overflow;
+
+    // Allocated once, on the first state vector that does not fit the primary
+    // table. Two threads can race here; the loser frees its own copy.
+    overflow = new OverflowMap();
+
+    OverflowMap* expected = nullptr;
+
+    if (!m_overflowMap.compare_exchange_strong(expected, overflow,
+          std::memory_order_acq_rel, std::memory_order_acquire)) {
+      delete overflow;
+      overflow = expected;
+    }
+
+    return overflow;
+  }
+
+
   DxvkGraphicsPipelineInstance* DxvkGraphicsPipeline::createInstance(
     const DxvkGraphicsPipelineStateInfo& state,
     const DxvkRenderPass*                renderPass) {
-    auto* existing = this->findInstanceLockFree(state, renderPass);
+    size_t hash = computeInstanceHash(state, renderPass);
+
+    auto* existing = this->findInstanceLockFree(hash, state, renderPass);
     if (existing != nullptr)
       return existing;
 
     VkPipeline pipeline = this->createPipeline(state, renderPass);
 
-    existing = this->findInstanceLockFree(state, renderPass);
+    existing = this->findInstanceLockFree(hash, state, renderPass);
     if (existing != nullptr) {
       this->destroyPipeline(pipeline);
       return existing;
@@ -308,7 +335,7 @@ namespace dxvk {
     m_pipeMgr->m_numGraphicsPipelines += 1;
     auto& inst = *m_pipelines.emplace(state, renderPass, pipeline);
 
-    this->insertInstanceToMap(state, renderPass, &inst);
+    this->insertInstanceToMap(hash, state, renderPass, &inst);
 
     if (pipeline != VK_NULL_HANDLE && !m_hasBasePipeline.load(std::memory_order_acquire)) {
       VkPipeline expected = VK_NULL_HANDLE;
