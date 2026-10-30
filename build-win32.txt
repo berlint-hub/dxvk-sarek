@@ -13,3 +13,11 @@ system = 'windows'
 cpu_family = 'x86'
 cpu = 'x86'
 endian = 'little'
+
+# The same semantics the release is built with (see .github/crossfiles).
+# meson's release build type adds -O3 and neither of these, so a local build
+# and an Actions artifact could optimise differently from the payload Autorun
+# installs -- and then a crash is impossible to reproduce across the two.
+[built-in options]
+c_args = ['-fno-strict-aliasing', '-fwrapv']
+cpp_args = ['-fno-strict-aliasing', '-fwrapv']

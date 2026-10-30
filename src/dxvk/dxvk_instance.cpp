@@ -9,11 +9,68 @@
 
 #include <algorithm>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace dxvk {
+
+  namespace {
+
+#ifdef _WIN32
+
+    /**
+     * \brief Says which DLL is running
+     *
+     * More than one DXVK build can sit on the console at once -- a release
+     * payload, a build dropped next to the game, a leftover version directory
+     * -- and the log otherwise looks the same for all of them. The image size
+     * and build timestamp tell them apart without opening a file.
+     */
+    void logLoadedImage() {
+      HMODULE module = nullptr;
+
+      if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                            | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+          reinterpret_cast<LPCWSTR>(&logLoadedImage), &module))
+        return;
+
+      wchar_t path[MAX_PATH] = { };
+
+      if (!GetModuleFileNameW(module, path, MAX_PATH))
+        return;
+
+      const wchar_t* name = wcsrchr(path, L'\\');
+
+      auto* image = reinterpret_cast<const uint8_t*>(module);
+      auto* dos   = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
+
+      if (dos->e_magic != IMAGE_DOS_SIGNATURE)
+        return;
+
+      auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(image + dos->e_lfanew);
+
+      if (nt->Signature != IMAGE_NT_SIGNATURE)
+        return;
+
+      Logger::info(str::format("Image: ", str::fromws(name ? name + 1 : path),
+        " (", nt->OptionalHeader.SizeOfImage, " bytes, built ",
+        nt->FileHeader.TimeDateStamp, ")"));
+    }
+
+#else
+
+    void logLoadedImage() { }
+
+#endif
+
+  }
+
 
   DxvkInstance::DxvkInstance() {
     Logger::info(str::format("Game: ", env::getExeName()));
     Logger::info(str::format("DXVK-Sarek: ", DXVK_VERSION));
+    logLoadedImage();
 
     wsi::init();
 
