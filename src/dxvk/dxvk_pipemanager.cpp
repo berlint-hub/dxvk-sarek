@@ -77,9 +77,14 @@ namespace dxvk {
     // active compilation method. Each sizes itself from the configuration and
     // neither knows about the other, which on a machine with a few cores can
     // add up to more threads than there are cores, all of them competing with
-    // the thread that has to submit frames. Nothing is changed here -- the
-    // numbers are the user's, or the automatic ones -- but a run where that
-    // adds up badly says so once, where it is cheapest to read.
+    // the thread that has to submit frames.
+    //
+    // Only one of them works at a time -- the warm-up runs before the game
+    // draws anything and the async compiler takes over from there -- so the
+    // sum is not what the game feels. The steady state is the larger of the
+    // two, and that is what is measured against the budget. A sum that would
+    // not fit even if both ran at once is worth naming too, but as a note
+    // rather than a warning, since it costs nothing in practice.
     {
       uint32_t cores  = std::max(1u, dxvk::thread::hardware_concurrency());
       uint32_t budget = compilerCoreBudget();
@@ -94,16 +99,24 @@ namespace dxvk {
         : uint32_t(device->config().numShaderCompilerThreads > 0
             ? device->config().numShaderCompilerThreads : autoCompilerThreads());
 
-      uint32_t total = stateCacheThreads + pipelineThreads;
+      uint32_t steady = std::max(stateCacheThreads, pipelineThreads);
+      uint32_t total  = stateCacheThreads + pipelineThreads;
 
-      if (total > budget) {
+      if (steady > budget) {
         Logger::warn(str::format(
+          "DXVK: ", steady, " background compiler threads on ", cores,
+          " cores (", stateCacheThreads, " state cache, ", pipelineThreads,
+          " ", method_name(m_compileMethod), ", one pool at a time). One core "
+          "is left for the game, so this can cost frame time: lower "
+          "dxvk.numCompilerThreads and dxvk.numShaderCompilerThreads, or set "
+          "DXVK_ALL_CORES=1 to give the compilers every core."));
+      } else if (total > cores) {
+        Logger::info(str::format(
           "DXVK: ", total, " background compiler threads on ", cores,
           " cores (", stateCacheThreads, " state cache, ", pipelineThreads,
-          " ", method_name(m_compileMethod), "). One core is left for the game, "
-          "so this can cost frame time: lower dxvk.numCompilerThreads and "
-          "dxvk.numShaderCompilerThreads, or set DXVK_ALL_CORES=1 to give the "
-          "compilers every core."));
+          " ", method_name(m_compileMethod), "). Only one pool runs at a time, "
+          "so this fits; the warm-up just keeps the cores busy before the game "
+          "starts drawing."));
       }
     }
   }
