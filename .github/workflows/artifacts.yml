@@ -41,3 +41,17 @@ jobs:
         name: dxvk-sarek-${{ env.VERSION_NAME }}
         path: build/dist/dxvk-sarek-${{ env.VERSION }}
         if-no-files-found: error
+
+    - name: What is in this build
+      if: always()
+      shell: bash
+      run: |
+        {
+          echo "### DLLs in `dxvk-sarek-${{ env.VERSION_NAME }}`"
+          echo
+          echo "Download them below under **Artifacts** at the bottom of this page."
+          echo
+          echo "| DLL | bytes |"
+          echo "|---|---:|"
+          find build/dist -name '*.dll' -printf '| `%p` | %s |\n' | sort
+        } >> "$GITHUB_STEP_SUMMARY"
