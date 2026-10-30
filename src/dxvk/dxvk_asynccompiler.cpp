@@ -4,26 +4,22 @@
 #include "dxvk_device.h"
 #include "dxvk_graphics.h"
 #include "dxvk_asynccompiler.h"
+#include "dxvk_threads.h"
 
 namespace dxvk {
 
   DxvkAsyncCompiler::DxvkAsyncCompiler(const DxvkDevice* device) {
-    std::string useAllCores = env::getEnvVar("DXVK_ALL_CORES");
-    uint32_t numCpuCores = dxvk::thread::hardware_concurrency();
-    uint32_t numWorkers = ((std::max(1u, numCpuCores) - 1) * 5) / 7;
-
-    if (numWorkers <  1) numWorkers =  1;
-    if (numWorkers > 32) numWorkers = 32;
+    uint32_t numWorkers = autoCompilerThreads();
 
     // Reduce worker count on 32-bit to save address space
     if (env::is32BitHostPlatform())
       numWorkers = std::min(numWorkers, 16u);
 
     if (device->config().numShaderCompilerThreads > 0)
-      numWorkers = device->config().numShaderCompilerThreads;
+      numWorkers = uint32_t(device->config().numShaderCompilerThreads);
 
-    if (useAllCores == "1")
-      numWorkers = numCpuCores;
+    if (env::getEnvVar("DXVK_ALL_CORES") == "1")
+      numWorkers = std::max(1u, dxvk::thread::hardware_concurrency());
 
     Logger::info(str::format("DXVK: Using ", numWorkers, " async compiler threads"));
 

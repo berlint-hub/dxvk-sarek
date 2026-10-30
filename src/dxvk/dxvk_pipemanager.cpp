@@ -5,6 +5,7 @@
 #include "dxvk_pipecompiler.h"
 #include "dxvk_pipemanager.h"
 #include "dxvk_state_cache.h"
+#include "dxvk_threads.h"
 
 namespace dxvk {
 
@@ -71,6 +72,40 @@ namespace dxvk {
           : nullptr) {
     Logger::info(str::format(
       "DXVK: Shader compilation method: ", method_name(m_compileMethod)));
+
+    // Two pools compile in the background: the state cache warm-up and the
+    // active compilation method. Each sizes itself from the configuration and
+    // neither knows about the other, which on a machine with a few cores can
+    // add up to more threads than there are cores, all of them competing with
+    // the thread that has to submit frames. Nothing is changed here -- the
+    // numbers are the user's, or the automatic ones -- but a run where that
+    // adds up badly says so once, where it is cheapest to read.
+    {
+      uint32_t cores  = std::max(1u, dxvk::thread::hardware_concurrency());
+      uint32_t budget = compilerCoreBudget();
+
+      uint32_t stateCacheThreads = m_stateCache != nullptr
+        ? uint32_t(device->config().numCompilerThreads > 0
+            ? device->config().numCompilerThreads : autoCompilerThreads())
+        : 0u;
+
+      uint32_t pipelineThreads = m_compileMethod == DxvkShaderCompileMethod::None
+        ? 0u
+        : uint32_t(device->config().numShaderCompilerThreads > 0
+            ? device->config().numShaderCompilerThreads : autoCompilerThreads());
+
+      uint32_t total = stateCacheThreads + pipelineThreads;
+
+      if (total > budget) {
+        Logger::warn(str::format(
+          "DXVK: ", total, " background compiler threads on ", cores,
+          " cores (", stateCacheThreads, " state cache, ", pipelineThreads,
+          " ", method_name(m_compileMethod), "). One core is left for the game, "
+          "so this can cost frame time: lower dxvk.numCompilerThreads and "
+          "dxvk.numShaderCompilerThreads, or set DXVK_ALL_CORES=1 to give the "
+          "compilers every core."));
+      }
+    }
   }
 
 
