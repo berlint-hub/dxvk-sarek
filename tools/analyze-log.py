@@ -41,6 +41,11 @@ DXVK_NEW_CACHE = re.compile(r"Creating new state cache file")
 DXVK_DEGRADED = re.compile(r"warn:\s+Degraded features: (?P<count>\d+)")
 DXVK_ERR = re.compile(r"^err:\s+(?P<text>.*)")
 INIT_CORES = re.compile(r"\[INIT\] processors=(?P<count>\d+)")
+VOODOO = re.compile(r"\[VOODOO\]")
+GL_RENDERER = re.compile(r"load name=(?:.*\\)?(RndrGL|opengl32)\.(?i:dll)")
+GL_SWAP = re.compile(r"\[NXGL\] WGL swap #(\d+)")
+NO_FRAME = re.compile(r"\[STALL\] no new frame for (\d+) s.*?presented (\d+) times")
+BUFFER_OUT = re.compile(r"a buffer is out and has not come back")
 
 
 class Run:
@@ -60,6 +65,11 @@ class Run:
         self.errors = []
         self.cores = None
         self.played = None
+        self.voodoo = False
+        self.gl_renderer = False
+        self.gl_swap = 0
+        self.no_frame = None
+        self.buffer_out = False
         self._parse()
 
     def _parse(self):
@@ -127,6 +137,28 @@ class Run:
                     self.degraded = int(m.group("count"))
                     continue
 
+                if VOODOO.search(line):
+                    self.voodoo = True
+                    continue
+
+                if GL_RENDERER.search(line):
+                    self.gl_renderer = True
+                    continue
+
+                m = GL_SWAP.search(line)
+                if m:
+                    self.gl_swap = max(self.gl_swap, int(m.group(1)))
+                    continue
+
+                m = NO_FRAME.search(line)
+                if m:
+                    self.no_frame = (int(m.group(1)), int(m.group(2)))
+                    continue
+
+                if BUFFER_OUT.search(line):
+                    self.buffer_out = True
+                    continue
+
                 m = DXVK_ERR.match(line)
                 if m:
                     self.errors.append(m.group("text").strip())
@@ -179,9 +211,40 @@ def report(run):
     print("%d frames over %d s%s" % (
         frames, seconds, (", ran %s" % run.played) if run.played else ""))
 
+    # -- was DXVK in the path at all -----------------------------------------
+    if run.dxvk_version is None:
+        heading("DXVK never loaded")
+        print("  No DXVK line appears in this log, so none of its settings apply")
+        print("  to this run and no change in DXVK can alter it.")
+        if run.voodoo:
+            print("  * the runtime wrapped the game in dgVoodoo: the wrapper's")
+            print("    d3d9.dll comes first on the DLL path, so the game talks to")
+            print("    it and DXVK is never asked for.")
+        if run.gl_renderer:
+            print("  * the game loaded an OpenGL renderer (RndrGL.dll /")
+            print("    opengl32.dll): it draws through the runtime's GL stack,")
+            print("    not through Direct3D, so there is nothing for DXVK to")
+            print("    intercept.")
+        if not run.voodoo and not run.gl_renderer:
+            print("  * neither a wrapper nor an OpenGL renderer was seen here, so")
+            print("    the program likely stopped before it asked for Direct3D.")
+            print("    A wrapper shows up in the runtime log as [VOODOO] lines, so")
+            print("    that log is worth reading alongside this one.")
+        if run.gl_swap or run.no_frame:
+            heading("Where it stopped")
+        if run.gl_swap:
+            print("  the program reached swap #%d" % run.gl_swap)
+        if run.no_frame:
+            print("  no new frame for %d s, %d presented in all" % run.no_frame)
+        if run.buffer_out:
+            print("  the screen reports a buffer out that has not come back:")
+            print("  the swap never completed, which is where the program stops")
+        if run.gl_swap or run.no_frame:
+            print()
+
     # -- what DXVK was doing -------------------------------------------------
-    heading("DXVK")
-    if run.dxvk_version:
+    if run.dxvk_version is not None:
+        heading("DXVK")
         print("  build            : %s" % run.dxvk_version)
     if run.dxvk_method:
         print("  compilation      : %s" % run.dxvk_method)
@@ -224,13 +287,21 @@ def report(run):
         playing = [r["fps"] for r in intervals if r["fps"] > 5]
 
         heading("Where it stalls")
+        if not playing or len(intervals) < 3:
+            print("  the program never got going: %.1f fps over %d intervals."
+                % (max(fps), len(intervals)))
+            print("  There is nothing to compare here; look at what it was")
+            print("  waiting for at the end of the log instead of at frame times.")
+            print()
+            playing = []
+
         if playing:
             print("  median while playing     : %.1f fps" % statistics.median(playing))
-        if quiet:
+        if quiet and playing:
             print("  intervals with <20 reads : %d, median %.1f fps" % (len(quiet), statistics.median(quiet)))
-        if busy:
+        if busy and playing:
             print("  intervals with >=100 reads: %d, median %.1f fps" % (len(busy), statistics.median(busy)))
-        if corr is not None:
+        if corr is not None and playing:
             print("  correlation fps/reads    : %.2f" % corr)
             if corr < -0.4 and quiet and busy:
                 print("  -> the dips follow the card, not the shaders: this is asset streaming.")
